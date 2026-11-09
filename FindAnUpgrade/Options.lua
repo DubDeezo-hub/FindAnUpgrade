@@ -1,0 +1,416 @@
+local _, N = ...
+local O = {}; N.Options = O
+local U, M = N.UI, N.Model
+local gold, ink, muted = {1,.82,.2}, {.93,.94,.97}, {.7,.7,.72}
+local panelWidth,panelHeight,bodyWidth,bodyHeight=620,690,572,710
+local rowStep,sectionGap,labelGap=28,24,20
+
+-- Keep this addon's two-column layout and persistence owner; SND owns chrome.
+function O:Style(frame,role)
+    local ok,err=N.App.ui:Style(frame,role)
+    if not ok then error(err.message,0)end
+end
+function O:CheckFrame(parent)
+    local frame=self:Frame("CheckButton",parent,"BackdropTemplate")
+    if not frame.Text then frame.Text=frame:CreateFontString(nil,"OVERLAY","GameFontNormal")end
+    frame.Text:ClearAllPoints();frame.Text:SetPoint("LEFT",frame,"RIGHT",4,0)
+    self:Style(frame,"checkbox")
+    return frame
+end
+local function bounded(text,width,height)
+    text.qOptionsWidth,text.qOptionsHeight=width,height; text:SetWordWrap(false)
+end
+local function fitBounded(text)
+    if not text.qOptionsWidth then return end
+    text:SetScale(1)
+    if text.qNoFit then text:SetSize(text.qOptionsWidth,text.qOptionsHeight);return end
+    local width,height=U:Measure(text); text.qNaturalWidth=width
+    local available=math.min(text.qOptionsWidth,width*text.qOptionsHeight/math.max(1,height))
+    local scale=U:FitText(text,available)
+    text:SetSize(text.qOptionsWidth/scale,text.qOptionsHeight/scale)
+    if text.qOptionsAnchor then U:AnchorText(text,unpack(text.qOptionsAnchor)) end
+end
+function O:FontCaption(object)
+    if self.formattingFont or not self.fontMeasure then return end
+    local value=self.owner.profile.font;local caption=value
+    for _,entry in ipairs(U:FontEntries()) do if entry.value==value then caption=entry.label;break end end
+    local path,size,flags=object:GetFont()
+    local key=caption..":"..tostring(path)..":"..tostring(size)..":"..tostring(flags)..":"..object:GetEffectiveScale()
+    if self.fontCaptionKey==key and object:GetText()==self.fontCaption then return end
+    self.formattingFont=true
+    local label=caption;local available=object.qOptionsWidth
+    self.fontMeasure:SetText(label)
+    local width=U:Measure(self.fontMeasure)
+    if width>available then
+        repeat
+            local last=#label
+            while last>1 and label:byte(last)>=128 and label:byte(last)<192 do last=last-1 end
+            label=label:sub(1,last-1)
+            self.fontMeasure:SetText(label.."...");width=U:Measure(self.fontMeasure)
+        until width<=available or label==""
+        label=label.."..."
+    end
+    self.fontCaptionKey,self.fontCaption=key,label
+    if object:GetText()~=label then object:SetText(label) end
+    self.formattingFont=nil
+end
+-- WoW objects are permanent. Reuse deterministic constructor slots after a
+-- transient failure rather than abandoning a new subtree on every retry.
+function O:Frame(kind,parent,template)
+    self.frameSlot=self.frameSlot+1
+    local entry=self.framePool[self.frameSlot]
+    if not entry then
+        entry={object=CreateFrame(kind,nil,parent,template),kind=kind,parent=parent,template=template}
+        self.framePool[self.frameSlot]=entry
+    end
+    assert(entry.kind==kind and entry.parent==parent and entry.template==template,"Options constructor order changed")
+    local control=entry.object
+    if kind=="Button" or kind=="CheckButton" or kind=="Slider" or kind=="EditBox" or kind=="DropdownButton" then
+        control:EnableMouse(true)
+        if kind=="Button" or kind=="CheckButton" then control:RegisterForClicks("LeftButtonUp")end
+    end
+    return control
+end
+function O:Text(parent)
+    self.textSlot=self.textSlot+1
+    local entry=self.textPool[self.textSlot]
+    if not entry then
+        entry={object=parent:CreateFontString(nil,"OVERLAY","GameFontNormal"),parent=parent}
+        self.textPool[self.textSlot]=entry
+    end
+    assert(entry.parent==parent,"Options text owner changed")
+    return entry.object
+end
+function O:Label(parent,value,x,y,width,size,color)
+    local t=self:Text(parent)
+    self.texts[#self.texts+1]={object=t,size=size or 12}; U:Font(t,size or 12)
+    t:SetPoint("TOPLEFT",x,y); t:SetJustifyH("LEFT"); t:SetJustifyV("MIDDLE")
+    t:SetShadowColor(0,0,0,.8); t:SetShadowOffset(1,-1); t:SetTextColor(unpack(color or ink))
+    if width then bounded(t,width,20) end
+    t:SetText(value); return t
+end
+function O:Button(parent,value,x,y,width,callback)
+    local b=self:Frame("Button",parent,"BackdropTemplate"); b:SetPoint("TOPLEFT",x,y); b:SetSize(width,22)
+    self:Style(b,"button")
+    b.text=self:Label(b,value,0,0,width-12,12); b.text:ClearAllPoints(); b.text:SetPoint("CENTER")
+    b:SetScript("OnClick",callback); self.controls[#self.controls+1]=b; return b
+end
+function O:Section(parent,value,x,y,width,height)
+    local box=self:Frame("Frame",parent,"BackdropTemplate")
+    box:SetFrameLevel(parent:GetFrameLevel()-1); box:SetPoint("TOPLEFT",x,y-9); box:SetSize(width,height)
+    self:Style(box,"section")
+    self:Label(parent,value,x+10,y,width-20,12,gold)
+    self.sections[#self.sections+1]=box; return box
+end
+function O:Dropdown(parent,x,y,width,entries,get,choose)
+    local d=self:Frame("DropdownButton",parent,"WowStyle1DropdownTemplate,BackdropTemplate")
+    d:SetPoint("TOPLEFT",x,y); d:SetSize(width,24);self:Style(d,"dropdown")
+    self.texts[#self.texts+1]={object=d.Text,size=12}; U:Font(d.Text,12)
+    d:SetDefaultText("Choose"); d.Text:ClearAllPoints(); d.Text:SetPoint("LEFT",d,"LEFT",9,0)
+    d.Text.qOptionsAnchor={"LEFT",d,"LEFT",9,0}; bounded(d.Text,width-31,24)
+    d.Text:SetHeight(24); d.Text:SetJustifyV("MIDDLE"); d.Text:SetJustifyH("LEFT"); d.text=d.Text
+    d:SetupMenu(function(_,root)
+        root:SetScrollMode(220)
+        for _,entry in ipairs(type(entries)=="function" and entries() or entries) do
+            local row=root:CreateRadio(entry.label,function(value) return get()==value end,choose,entry.value)
+            row:AddInitializer(function(button)
+                -- Native compositor text accepts an owned Font object, not SetFont.
+                button.fontString:SetFontObject(self.menuFont)
+            end)
+        end
+    end)
+    d.qEntries,d.qGet=entries,get
+    self.dropdowns[#self.dropdowns+1]=d; self.controls[#self.controls+1]=d; return d
+end
+function O:CloseMenu()
+    for _,d in ipairs(self.dropdowns or {}) do d:CloseMenu() end
+end
+function O:Check(parent,key,value,x,y,searchDefault)
+    local b=self:CheckFrame(parent)
+    b:SetPoint("TOPLEFT",x-4,y); b:SetSize(24,24); b.key,b.caption=key,value; b.text=b.Text
+    self.texts[#self.texts+1]={object=b.Text,size=12}; U:Font(b.Text,12)
+    b.Text:SetJustifyH("LEFT"); b.Text:SetTextColor(unpack(ink)); bounded(b.Text,240,24)
+    b:SetHitRectInsets(0,-240,0,0); b.Text:SetText(value)
+    b.searchDefault=searchDefault
+    b:SetScript("OnClick",function()
+        if searchDefault then self.owner:ChangeSearchDefault(key,b:GetChecked()==true) else self.owner:Change(key,b:GetChecked()==true) end
+    end)
+    self.checks[key]=b; self.controls[#self.controls+1]=b; return b
+end
+function O:Slider(parent,key,value,x,y,low,high,step)
+    self:Label(parent,value,x,y,260,12)
+    local b=self:Frame("Slider",parent,"BackdropTemplate")
+    b:SetPoint("TOPLEFT",x,y-25); b:SetSize(180,16); b:SetOrientation("HORIZONTAL");self:Style(b,"slider")
+    b:SetMinMaxValues(low,high); b:SetValueStep(step); b:SetObeyStepOnDrag(true)
+    local e=self:Frame("EditBox",parent,"InputBoxScriptTemplate,BackdropTemplate")
+    self.texts[#self.texts+1]={object=e,size=12}
+    e:SetPoint("TOPLEFT",x+202,y-20); e:SetSize(58,22); U:Font(e,12)
+    self:Style(e,"input");e:SetTextInsets(6,6,0,0); e:SetAutoFocus(false); e:SetMaxLetters(48)
+    self.edits[key]=e; b.edit=e
+    b:SetScript("OnValueChanged",function(_,v)
+        if not self.refreshing then self.owner:Change(key,math.floor(v+.5)/100) end
+    end)
+    e:SetScript("OnEnterPressed",function()
+        local v=tonumber(e:GetText()) or self.owner.profile[key]*100
+        v=math.max(low,math.min(high,math.floor(v+.5))); e:ClearFocus()
+        if not self.owner:Change(key,v/100) then self:Refresh() end
+    end)
+    e:SetScript("OnEscapePressed",function() e:ClearFocus(); self:Refresh() end)
+    self:Label(parent,low.."-"..high.."%",x,y-47,260,11,muted)
+    self.sliders[key]=b; self.controls[#self.controls+1]=b; self.controls[#self.controls+1]=e; return b
+end
+-- Scrolling keeps the shell, reset and status fixed, and never commits an
+-- unfinished numeric edit. The same native vertical control is used by Search.
+function O:Scroll(value,layout)
+    if not M.Number(value) then return end
+    local offset=math.max(0,math.min(self.maximum or 0,value))
+    local changed=offset~=(self.offset or 0)
+    self.offset=offset;self.scrolling=true
+    self.scroll:SetVerticalScroll(offset);self.bar:SetValue(offset);self.scrolling=nil
+    if changed and not layout then
+        self:CloseMenu();for _,e in pairs(self.edits) do e:ClearFocus() end
+        self:Refresh()
+    end
+end
+function O:Layout()
+    local scale=math.min(1,math.max(.1,(UIParent:GetWidth()-24)/panelWidth))
+    local height=math.max(100,math.min(panelHeight,(UIParent:GetHeight()-24)/scale))
+    local key=scale..":"..height..":"..UIParent:GetEffectiveScale()
+    if self.layoutKey and self.layoutKey~=key then
+        self:CloseMenu();for _,e in pairs(self.edits) do e:ClearFocus() end
+    end
+    self.layoutKey=key
+    self.frame:SetScale(scale);self.frame:SetHeight(height)
+    local viewport=height-90
+    self.scroll:SetSize(bodyWidth,viewport);self.body:SetSize(bodyWidth,bodyHeight)
+    self.bar:SetHeight(math.max(22,viewport-4))
+    self.maximum=math.max(0,bodyHeight-viewport)
+    self.bar:GetThumbTexture():SetHeight(math.max(22,self.bar:GetHeight()*math.min(1,viewport/bodyHeight)))
+    self.scrolling=true;self.bar:SetMinMaxValues(0,self.maximum);self.bar:SetShown(self.maximum>0);self.scrolling=nil
+    self:Scroll(self.offset or 0,true)
+end
+function O:SearchNumber(parent,key,label,x,y)
+    -- Short numeric rows keep their field near the label, centered in the same
+    -- 24px row as the native checkboxes rather than at the slider value column.
+    local caption=self:Label(parent,label,x,y,108,12);bounded(caption,108,24)
+    local e=self:Frame("EditBox",parent,"InputBoxScriptTemplate,BackdropTemplate")
+    e:SetPoint("TOPLEFT",x+120,y-1);e:SetSize(58,22);self:Style(e,"input");e:SetTextInsets(6,6,0,0);e:SetAutoFocus(false);e:SetMaxLetters(8);U:Font(e,12)
+    self.texts[#self.texts+1]={object=e,size=12};self.edits[key]=e;self.controls[#self.controls+1]=e
+    e.searchDefault=key
+    e:SetScript("OnEnterPressed",function()
+        local value=tonumber(e:GetText())
+        if not M.Number(value) then value=self.owner.profile.searchDefaults[key] end
+        e:ClearFocus();if not self.owner:ChangeSearchDefault(key,value) then self:Refresh() end
+    end)
+    e:SetScript("OnEscapePressed",function()e:ClearFocus();self:Refresh()end)
+end
+function O:Build(owner,f,parent)
+    parent:SetAllPoints(f)
+    f:SetSize(panelWidth,panelHeight); f:SetPoint("CENTER"); f:SetFrameStrata("DIALOG")
+    self:Style(f,"dialog")
+    f:EnableMouse(true); f:SetClampedToScreen(true); f:SetMovable(true); f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart",function() f:StartMoving() end); f:SetScript("OnDragStop",function() f:StopMovingOrSizing() end)
+    self.menuFont=self.menuFont or CreateFont("FindAnUpgradeMenuFont"); U:Font(self.menuFont,12)
+    self:Label(parent,"FindAnUpgrade",20,-15,560,16,gold)
+    self.close=self:Frame("Button",parent,"UIPanelCloseButton")
+    self.close:SetSize(24,24); self.close:SetPoint("TOPRIGHT",-8,-8); self.close:SetScript("OnClick",function() f:Hide() end)
+    local scroll=self:Frame("ScrollFrame",parent);self.scroll=scroll
+    scroll:SetPoint("TOPLEFT",16,-46);scroll:SetSize(bodyWidth,bodyHeight)
+    scroll:EnableMouse(true);scroll:EnableMouseWheel(true)
+    local page=self:Frame("Frame",scroll);self.body=page;page:SetSize(bodyWidth,bodyHeight);scroll:SetScrollChild(page)
+    self.bar=self:Frame("Slider",parent,"BackdropTemplate");self.bar:SetOrientation("VERTICAL");self.bar:SetWidth(8);self:Style(self.bar,"scrollbar")
+    self.bar:SetPoint("TOPRIGHT",-14,-48);self.bar:SetHeight(bodyHeight-4);self.bar:SetValueStep(1)
+    self.bar:SetScript("OnValueChanged",function(_,value)if not self.scrolling then self:Scroll(value)end end)
+    scroll:SetScript("OnMouseWheel",function(_,delta)if M.Number(delta)then self:Scroll((self.offset or 0)-delta*40)end end)
+    local secondaryY=-212-sectionGap;local searchY=secondaryY-132-sectionGap
+    self:Section(page,"Appearance",0,0,280,212);self:Section(page,"Inspection",292,0,280,212)
+    self:Section(page,"Quest previews",0,secondaryY,280,248);self:Section(page,"Surfaces",292,secondaryY,280,132)
+    self:Section(page,"Search defaults",292,searchY,280,216)
+    self:Label(page,"Font",12,-25,260,12)
+    self.font=self:Dropdown(page,12,-25-labelGap,260,function()return U:FontEntries()end,function()return owner.profile.font end,function(value)owner:Change("font",value)end)
+    self.font.Text.qNoFit=true
+    self.fontMeasure=self:Text(parent);U:Font(self.fontMeasure,12);self.fontMeasure:SetWordWrap(false);self.fontMeasure:Hide()
+    self.texts[#self.texts+1]={object=self.fontMeasure,size=12}
+    if not self.font.qCaptionHooked then
+        hooksecurefunc(self.font.Text,"SetText",function(object)self:FontCaption(object)end);self.font.qCaptionHooked=true
+    end
+    self:Label(page,"Border",12,-83,260,12)
+    self.border=self:Dropdown(page,12,-83-labelGap,260,{
+        {value="default",label="Default"},{value="none",label="None"},{value="tooltip",label="Tooltip"},{value="dialog",label="Dialog"},{value="thin",label="Thin"}
+    },function()return owner.profile.border end,function(value)owner:Change("border",value)end)
+    self:Slider(page,"scale","Preview and search scale",12,-142,80,120,5)
+    self:Check(page,"accents","Quest colors",12,secondaryY-25)
+    self:Check(page,"dialogTint","Quest dialog tint",12,secondaryY-25-rowStep)
+    self:Check(page,"rewards","Reward details",12,secondaryY-25-rowStep*2)
+    self:Label(page,"Preview layout",12,secondaryY-117,260,12)
+    self.layout=self:Dropdown(page,12,secondaryY-117-labelGap,260,{
+        {value="tooltip",label="Game tooltip"},{value="inspector",label="Compact inspector"}
+    },function() return owner.profile.previewLayout end,function(value) owner:Change("previewLayout",value) end)
+    self:Slider(page,"strength","Tint strength",12,secondaryY-177,10,100,5)
+    self:Check(page,"enabled","Enabled",304,-25)
+    self:Label(page,"Reveal key",304,-65,260,12)
+    self.modifier=self:Dropdown(page,304,-65-labelGap,260,{
+        {value="SHIFT",label="Shift"},{value="CTRL",label="Ctrl"},{value="ALT",label="Alt"},{value="NONE",label="None"}
+    },function() return owner.profile.modifier end,function(value) owner:Change("modifier",value) end)
+    self.hint=self:Label(page,"Release to inspect. Escape closes.",304,-115,260,11,muted)
+    self:Label(page,"Quest inspector position",304,-147,260,12)
+    self.position=self:Dropdown(page,304,-147-labelGap,260,{
+        {value="right",label="Right of cursor"},{value="tooltip",label="Beside game tooltip"}
+    },function() return owner.profile.inspectionPosition end,function(value) owner:Change("inspectionPosition",value) end)
+    self:Check(page,"npc","NPC previews",304,secondaryY-25)
+    self:Check(page,"worldmap","World map previews",304,secondaryY-25-rowStep)
+    self:Check(page,"minimap","Minimap previews",304,secondaryY-25-rowStep*2)
+    self:Check(page,"launcher","Minimap launcher",304,secondaryY-25-rowStep*3)
+    self:Check(page,"hideUnusable","Hide unusable",304,searchY-25,true)
+    self:Check(page,"includeDungeons","Include dungeon quests",304,searchY-25-rowStep,true)
+    self:Check(page,"hideCompleted","Hide completed quests",304,searchY-25-rowStep*2)
+    self:SearchNumber(page,"levelsBelow","Levels below",304,searchY-25-rowStep*3)
+    self:SearchNumber(page,"levelsAbove","Levels above",304,searchY-25-rowStep*4)
+    self:Label(page,"Other defaults apply on next open.",304,searchY-173,260,11,muted)
+    self:Label(page,"Starts in the current zone.",304,searchY-193,260,11,muted)
+    local contributeY=secondaryY-248-sectionGap
+    self:Section(page,"Contribute quest data",0,contributeY,280,174)
+    local record=self:CheckFrame(page);self.record=record;record.recorder=true
+    record:SetPoint("TOPLEFT",8,contributeY-25);record:SetSize(24,24)
+    self.texts[#self.texts+1]={object=record.Text,size=12};U:Font(record.Text,12)
+    record.Text:SetText("Record encountered quests");record.Text:SetTextColor(unpack(ink))
+    bounded(record.Text,240,24);record:SetHitRectInsets(0,-240,0,0)
+    record:SetScript("OnClick",function() self.confirmClear=nil;N.Recorder:Enable(record:GetChecked()==true);self:RefreshRecorder() end)
+    self.controls[#self.controls+1]=record
+    self:Label(page,"No names or automatic uploads.",12,contributeY-57,260,11,muted)
+    self:Label(page,"Review exports before sharing.",12,contributeY-77,260,11,muted)
+    self.recordStatus=self:Label(page,"",12,contributeY-103,260,11,muted)
+    self.export=self:Button(page,"Export",12,contributeY-135,110,function() self:ExportObservations() end);self.export.recorder=true
+    self.clear=self:Button(page,"Clear",142,contributeY-135,126,function()
+        if self.confirmClear then N.Recorder:Clear();self.confirmClear=nil else self.confirmClear=true end
+        self:RefreshRecorder()
+    end);self.clear.recorder=true
+    self.reset=self:Button(parent,"Reset",0,0,86,function() owner:Defaults() end)
+    self.reset:ClearAllPoints();self.reset:SetPoint("BOTTOMLEFT",20,16)
+    self.status=self:Label(parent,"",0,0,484,11,muted)
+    self.status:ClearAllPoints();self.status:SetPoint("BOTTOMLEFT",116,16)
+    f:SetScript("OnShow",function() self:Refresh() end)
+    f:SetScript("OnHide",function()
+        self.confirmClear=nil;self:CloseExport()
+        self:CloseMenu(); for _,e in pairs(self.edits) do e:ClearFocus() end; f:StopMovingOrSizing();f:SetScript("OnUpdate",nil);self.menuWaiting=nil
+    end)
+    f:RegisterEvent("UI_SCALE_CHANGED"); f:RegisterEvent("DISPLAY_SIZE_CHANGED"); f:SetScript("OnEvent",function() self:Refresh() end)
+end
+function O:Create(owner)
+    if self.frame then return end
+    self.owner=owner; self.texts={}; self.controls={}; self.checks={}; self.sliders={}; self.edits={}; self.dropdowns={}; self.sections={}
+    -- Publish only complete controls. A failed construction leaves a hidden
+    -- shell that the next slash invocation can reuse, never a cached blank UI.
+    local f=self.shell or CreateFrame("Frame","FindAnUpgradeOptions",UIParent,"BackdropTemplate"); self.shell=f; f:Hide()
+    local parent=self.content or CreateFrame("Frame",nil,f); self.content=parent
+    self.framePool,self.textPool=self.framePool or {},self.textPool or {}
+    self.frameSlot,self.textSlot=0,0
+    parent:Show()
+    local ok,err=pcall(self.Build,self,owner,f,parent)
+    if not ok then
+        parent:Hide(); f:Hide(); f:UnregisterAllEvents(); self:CloseMenu()
+        f:SetScript("OnShow",nil); f:SetScript("OnEvent",nil)
+        for _,entry in ipairs(self.texts) do
+            if U.fontSizes then U.fontSizes[entry.object]=nil end
+            if U.fontApplications then U.fontApplications[entry.object]=nil end
+        end
+        if U.fontSizes and self.menuFont then U.fontSizes[self.menuFont]=nil end
+        if U.fontApplications and self.menuFont then U.fontApplications[self.menuFont]=nil end
+        self.texts={}; self.controls={}; self.checks={}; self.sliders={}; self.edits={}; self.dropdowns={}; self.sections={}
+        self.status=nil; self.modifier=nil; self.close=nil; self.reset=nil
+        error(err,0)
+    end
+    self.frame=f; self.content=parent
+    UISpecialFrames=UISpecialFrames or {}; table.insert(UISpecialFrames,"FindAnUpgradeOptions")
+end
+function O:FlushMenus()
+    local pending=false
+    for _,d in ipairs(self.dropdowns) do
+        if d.qMenuKey~=d.qWantedMenuKey then
+            local open=type(d.IsMenuOpen)=="function" and d:IsMenuOpen() or d.menuOpen==true
+            if open then pending=true else d:GenerateMenu();d.qMenuKey=d.qWantedMenuKey end
+        end
+    end
+    if pending and self.frame:IsShown() and not self.menuWaiting then
+        self.menuWaiting=true
+        self.frame:SetScript("OnUpdate",function()
+            if self:FlushMenus() then self.menuWaiting=nil;self.frame:SetScript("OnUpdate",nil);self:RefreshFonts() end
+        end)
+    end
+    return not pending
+end
+function O:SyncMenus()
+    local path,size,flags=self.menuFont:GetFont()
+    local font=tostring(path)..":"..tostring(size)..":"..tostring(flags)
+    for _,d in ipairs(self.dropdowns) do
+        local entries=type(d.qEntries)=="function" and d.qEntries() or d.qEntries
+        d.qWantedMenuKey=font..":"..tostring(d.qGet())..":"..tostring(entries)
+    end
+    return self:FlushMenus()
+end
+function O:RefreshFonts(regenerate)
+    if not self.frame then return end
+    local oldPath,oldSize,oldFlags=self.menuFont:GetFont(); U:Font(self.menuFont,12)
+    for _,entry in ipairs(self.texts) do U:Font(entry.object,entry.size) end
+    U:RefreshFonts()
+    local path,size,flags=self.menuFont:GetFont()
+    if regenerate or path~=oldPath or size~=oldSize or flags~=oldFlags then
+        self:SyncMenus()
+    end
+    self:FontCaption(self.font.Text)
+    for _,entry in ipairs(self.texts) do fitBounded(entry.object) end
+end
+function O:Refresh()
+    if not self.frame then return end
+    self.refreshing=true; local p=self.owner.profile
+    self:Layout()
+    for key,b in pairs(self.checks) do b.Text:SetText(b.caption); b:SetChecked(b.searchDefault and p.searchDefaults[key] or not b.searchDefault and p[key]) end
+    for key,b in pairs(self.sliders) do b:SetValue(p[key]*100); b.edit:SetText(tostring(math.floor(p[key]*100+.5))) end
+    for key,e in pairs(self.edits) do if e.searchDefault then e:SetText(tostring(p.searchDefaults[key])) end end
+    for _,b in ipairs(self.controls) do if self.owner.readOnly and not b.navigation and not b.recorder then b:Disable() else b:Enable() end end
+    self.status:SetText(self.owner.readOnly and "Newer settings are read-only." or not self.owner.supported and "Unsupported client." or "")
+    self.hint:SetText(p.modifier~="NONE" and p.previewLayout=="tooltip" and "Release to inspect. Escape closes." or "Escape closes the preview.")
+    self:RefreshFonts(); self:SyncMenus(); self.refreshing=false
+    self:RefreshRecorder()
+    if self.exportMode then self.scroll:Hide();self.bar:Hide();self.reset:Hide();self.status:Hide() end
+end
+function O:RefreshRecorder()
+    if not self.record then return end
+    local R,D=N.Recorder,N.ObservationData
+    self.record:SetChecked(R.active==true);self.recordStatus:SetText(R:Status())
+    self.clear.text:SetText(self.confirmClear and "Confirm clear" or "Clear")
+    if D.readOnly or D.full or not R.client or not self.owner.supported or not self.owner.profile.enabled then self.record:Disable() else self.record:Enable() end
+    for _,button in ipairs({self.export,self.clear}) do if D.readOnly then button:Disable() else button:Enable() end end
+end
+function O:CloseExport()
+    if not self.exportMode then return end
+    self.exportMode=nil;self.exportEditor.EditBox:ClearFocus();self.exportEditor.EditBox:SetText("");self.exportPanel:Hide()
+    self.scroll:Show();self.reset:Show();self.status:Show();self.bar:SetShown((self.maximum or 0)>0)
+end
+function O:ExportObservations()
+    local value=N.ObservationData:Export();if not value then return end
+    self.confirmClear=nil;self:CloseMenu()
+    for _,e in pairs(self.edits) do e:ClearFocus() end
+    if not self.exportPanel then
+        local panel=CreateFrame("Frame",nil,self.content);self.exportPanel=panel
+        panel:SetPoint("TOPLEFT",16,-46);panel:SetPoint("BOTTOMRIGHT",-16,46)
+        -- This native template owns multiline caret scrolling and its scrollbar.
+        local editor=CreateFrame("ScrollFrame",nil,panel,"InputScrollFrameTemplate");self.exportEditor=editor
+        editor:SetPoint("TOPLEFT",8,-40);editor:SetPoint("BOTTOMRIGHT",-24,8);editor:SetSize(bodyWidth-40,400)
+        editor.EditBox:SetWidth(bodyWidth-58);editor.EditBox:SetMaxLetters(N.ObservationData.byteLimit)
+        editor.CharCount:Hide();editor.EditBox.Instructions:Hide();U:Font(editor.EditBox,12)
+        editor.EditBox:SetScript("OnEscapePressed",function() self:CloseExport() end)
+        local back=CreateFrame("Button",nil,panel,"UIPanelButtonTemplate");back:SetPoint("TOPLEFT",0,0);back:SetSize(76,22);back:SetText("Back")
+        back:SetScript("OnClick",function() self:CloseExport() end)
+        local hint=panel:CreateFontString(nil,"OVERLAY","GameFontNormal");U:Font(hint,12)
+        hint:SetPoint("TOPLEFT",90,-4);hint:SetText("Ctrl+C to copy. Save as a JSON file for review.")
+    end
+    self.exportMode=true;self.scroll:Hide();self.bar:Hide();self.reset:Hide();self.status:Hide();self.exportPanel:Show()
+    self.exportEditor.EditBox:SetText(value);self.exportEditor.EditBox:SetFocus();self.exportEditor.EditBox:HighlightText()
+end
+function O:Toggle(owner)
+    if N.Copy then N.Copy:Hide() end
+    if N.Search and N.Search.frame then N.Search:CloseMenu();N.Search.inspector:ClearItem() end
+    if not self.frame then self:Create(owner) end
+    self.frame:SetShown(not self.frame:IsShown())
+end
